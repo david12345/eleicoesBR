@@ -169,6 +169,7 @@
       <span class="dot" id="dot"></span>
       <span id="statusText">Iniciando…</span>
       <button id="pauseBtn" type="button">Pausar</button>
+      <a id="appLink" href="#" target="_blank" rel="noopener" style="display:none;color:var(--accent)">Ver no app do TSE ↗</a>
       <button id="themeBtn" type="button" title="Alternar tema">◐</button>
     </div>
   </header>
@@ -236,7 +237,7 @@
       <label>Proxy CORS (opcional, prefixo)
         <input id="cProxy" placeholder="https://meu-proxy/?url=">
       </label>
-      <label class="full">URL personalizada (opcional; substitui os campos acima)
+      <label class="full">URL personalizada ou link do app do TSE (opcional; substitui os campos acima)
         <input id="cUrl" placeholder="https://resultados.tse.jus.br/oficial/ele2026/6258/dados/br/br-c0001-e006258-u.json">
       </label>
     </div>
@@ -336,12 +337,24 @@
     $('cMode').value = cfg.mode; $('cCiclo').value = cfg.ciclo; $('cEleicao').value = cfg.eleicao;
     $('cCargo').value = cfg.cargo; $('cAbr').value = cfg.abr; $('cProxy').value = cfg.proxy; $('cUrl').value = cfg.url;
     $('urlUsed').textContent = cfg.mode === 'sim' ? 'simulação local' : buildUrl(cfg);
+    const link = $('appLink');
+    if (cfg.mode === 'tse' && cfg.eleicao) { link.href = appUrl(cfg); link.style.display = ''; } else link.style.display = 'none';
   }
+  // link do app oficial: …/oficial/app/index.html#/eleicao/6258/uf/br/cargo/1/…
+  const APP_RE = /#\/eleicao\/(\d+)\/uf\/([a-z]{2})\/cargo\/(\d+)/i;
+  const appUrl = (c) => `${TSE_BASE}/app/index.html#/eleicao/${c.eleicao}/uf/${c.abr}/cargo/${Number(c.cargo)}/vis/nominal/resultados`;
+
   function readForm() {
-    return {
+    const f = {
       mode: $('cMode').value, ciclo: $('cCiclo').value.trim() || 'ele2026', eleicao: $('cEleicao').value.trim(),
       cargo: $('cCargo').value, abr: ($('cAbr').value.trim() || 'br').toLowerCase(), proxy: $('cProxy').value.trim(), url: $('cUrl').value.trim(),
     };
+    const m = f.url.match(APP_RE);
+    if (m) {
+      Object.assign(f, { mode: 'tse', eleicao: m[1], abr: m[2].toLowerCase(), cargo: m[3].padStart(4, '0'), url: '' });
+      if (!/^ele\d{4}$/.test(f.ciclo)) f.ciclo = 'ele' + new Date().getFullYear();
+    }
+    return f;
   }
 
   // ---------- simulação (gera JSON no mesmo formato do TSE) ----------
