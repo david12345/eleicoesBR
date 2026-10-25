@@ -220,7 +220,7 @@
         <input id="cCiclo" placeholder="ele2026">
       </label>
       <label>Código da eleição
-        <input id="cEleicao" placeholder="ex.: 545">
+        <input id="cEleicao" placeholder="ex.: 6258">
       </label>
       <label>Cargo
         <select id="cCargo">
@@ -237,7 +237,7 @@
         <input id="cProxy" placeholder="https://meu-proxy/?url=">
       </label>
       <label class="full">URL personalizada (opcional; substitui os campos acima)
-        <input id="cUrl" placeholder="https://resultados.tse.jus.br/oficial/ele2026/…/dados-simplificados/br/br-c0001-e000…-r.json">
+        <input id="cUrl" placeholder="https://resultados.tse.jus.br/oficial/ele2026/6258/dados/br/br-c0001-e006258-u.json">
       </label>
     </div>
     <div class="actions">
@@ -247,7 +247,7 @@
       <button id="simBtn" type="button">Usar simulação</button>
     </div>
     <div class="note">URL usada: <code id="urlUsed">–</code></div>
-    <div class="note">Os parâmetros também podem ir na URL da página: <code>?ciclo=ele2026&amp;eleicao=XXX&amp;cargo=0001&amp;abr=br</code> ou <code>?modo=sim</code>.
+    <div class="note">Os parâmetros também podem ir na URL da página: <code>?ciclo=ele2026&amp;eleicao=6258&amp;cargo=0001&amp;abr=br</code> ou <code>?modo=sim</code>.
       Se o navegador bloquear a requisição (CORS), use um proxy ou abra a página a partir de um servidor que permita acesso ao TSE.</div>
     <h2 style="margin-top:16px">Como a projeção funciona</h2>
     <ul class="method">
@@ -276,7 +276,8 @@
   const num = (v) => {
     if (v == null || v === '') return 0;
     if (typeof v === 'number') return v;
-    const n = Number(String(v).replace(/\./g, '').replace(',', '.'));
+    const t = String(v).trim();
+    const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t);
     return Number.isFinite(n) ? n : 0;
   };
   const pctNum = (v) => num(v) / 100;
@@ -319,11 +320,16 @@
   if (cfg.mode === 'tse' && !cfg.eleicao && !cfg.url) cfg.mode = 'auto';
   let autoFailed = '';
 
-  const buildUrl = (c) => {
-    if (c.url) return c.url;
+  // 2026+: resultado unificado (EA20) em /dados/…-u.json; até 2022: /dados-simplificados/…-r.json
+  const buildUrls = (c) => {
+    if (c.url) return [c.url];
     const abr = (c.abr || 'br').toLowerCase();
-    return `${TSE_BASE}/${c.ciclo}/${c.eleicao}/dados-simplificados/${abr}/${abr}-c${c.cargo}-e${pad6(c.eleicao)}-r.json`;
+    const dir = `${TSE_BASE}/${c.ciclo}/${c.eleicao}`;
+    const file = `${abr}-c${c.cargo}-e${pad6(c.eleicao)}`;
+    return [`${dir}/dados/${abr}/${file}-u.json`, `${dir}/dados-simplificados/${abr}/${file}-r.json`];
   };
+  let urlIdx = 0;
+  const buildUrl = (c) => { const u = buildUrls(c); return u[Math.min(urlIdx, u.length - 1)]; };
   const withProxy = (u) => (cfg.proxy ? cfg.proxy + encodeURIComponent(u) : u);
 
   function fillForm() {
@@ -405,11 +411,39 @@
   let inFlight = false;
 
   function reset() {
+    urlIdx = 0;
     history = []; meta = new Map(); nextColor = 0; fails = 0; lastError = ''; lastRaw = null; lastFetchAt = null;
     simNext = cfg.mode === 'sim' ? makeSim() : null;
   }
 
+  // converte o arquivo unificado (EA20, 2026+) para o formato simplificado usado no resto da página
+  function fromUnified(j) {
+    const s = j.s || {}, v = j.v || {}, e = j.e || {};
+    const cand = [];
+    const cargo = (j.carg || [])[0] || {};
+    for (const agr of cargo.agr || []) {
+      for (const par of agr.par || []) {
+        for (const k of par.cand || []) {
+          cand.push({ n: k.n, nm: k.nmu || k.nm, cc: par.sg || agr.nm || '', vap: k.vap, pvap: k.pvap,
+            e: k.e === 's' || /^eleit/i.test(k.st || '') ? 's' : 'n', st: k.st || '' });
+        }
+      }
+    }
+    const te = num(e.te), c = num(e.c);
+    let pst = s.pst;
+    if ((pst == null || pst === '') && num(s.ts)) pst = String(num(s.st) / num(s.ts) * 100).replace('.', ',');
+    return {
+      ele: j.ele, t: j.t, dg: j.dg, hg: j.hg,
+      s: s.ts, st: s.st, pst,
+      e: e.te, c: e.c, a: e.a, pa: e.pa,
+      pc: e.pc != null ? e.pc : (te ? String(c / te * 100).replace('.', ',') : ''),
+      vb: v.vb, pvb: v.pvb, tvn: v.tvn, ptvn: v.ptvn, vv: v.vv,
+      cand,
+    };
+  }
+
   function parseTse(j) {
+    if (j && j.carg) j = fromUnified(j);
     const cand = (j.cand || []).map((k) => ({
       n: String(k.n), nm: k.nm || k.nmu || ('Nº ' + k.n), cc: k.cc || '', v: num(k.vap), eleito: k.e === 's', st: k.st || '',
     }));
@@ -525,15 +559,25 @@
 
   // ---------- busca ----------
   async function fetchTse() {
-    const url = buildUrl(cfg);
-    const sep = url.includes('?') ? '&' : '?';
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 8000);
-    try {
-      const r = await fetch(withProxy(url + sep + '_=' + Date.now()), { cache: 'no-store', signal: ctrl.signal });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return await r.json();
-    } finally { clearTimeout(to); }
+    const urls = buildUrls(cfg);
+    let lastErr;
+    // tenta primeiro o formato que funcionou por último; em 404 passa para o próximo
+    for (let i = 0; i < urls.length; i++) {
+      const idx = (urlIdx + i) % urls.length;
+      const url = urls[idx];
+      const sep = url.includes('?') ? '&' : '?';
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const r = await fetch(withProxy(url + sep + '_=' + Date.now()), { cache: 'no-store', signal: ctrl.signal });
+        if (r.status === 404 || r.status === 403) { lastErr = new Error('HTTP ' + r.status); continue; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        if (idx !== urlIdx) { urlIdx = idx; $('urlUsed').textContent = url; }
+        return j;
+      } finally { clearTimeout(to); }
+    }
+    throw lastErr;
   }
 
   async function tick() {
@@ -826,13 +870,23 @@
     const j = await r.json();
     const today = new Date().toLocaleDateString('pt-BR');
     const all = [];
-    (j.pl || []).forEach((pl) => (pl.e || []).forEach((e) => all.push({ ciclo: pl.cdpr || pl.cd, cd: e.cd, dt: e.dt || pl.dt || '', nm: e.nm || '', t: e.t, tp: e.tp })));
+    // o ciclo é a pasta "eleAAAA"; se não vier explícito, deriva do ano da data
+    const cicloDe = (...xs) => {
+      const hit = xs.find((x) => /^ele\d{4}$/i.test(String(x || '')));
+      if (hit) return String(hit).toLowerCase();
+      const ano = xs.map((x) => String(x || '').match(/(\d{4})$/)).find(Boolean);
+      return ano ? 'ele' + ano[1] : 'ele' + new Date().getFullYear();
+    };
+    (j.pl || []).forEach((pl) => (pl.e || []).forEach((e) => all.push({
+      ciclo: cicloDe(pl.cdpr, pl.ciclo, pl.cd, e.ciclo, e.dt || pl.dt), cd: String(e.cd), dt: e.dt || pl.dt || '', nm: e.nm || '', t: e.t, tp: e.tp,
+    })));
     if (!all.length) throw new Error('formato inesperado');
     const toKey = (d) => { const [dd, mm, yy] = String(d).split('/'); return `${yy}${mm}${dd}`; };
     let pick = all.filter((e) => e.dt === today);
     if (!pick.length) pick = all.slice().sort((a, b) => toKey(b.dt).localeCompare(toKey(a.dt))).slice(0, 1);
-    // preferir eleição ordinária (não suplementar)
-    pick.sort((a, b) => (String(a.tp) === '0' ? -1 : 0) - (String(b.tp) === '0' ? -1 : 0));
+    // preferir eleição ordinária federal (não suplementar)
+    const score = (e) => (String(e.tp) === '0' ? 2 : 0) + (/federal|geral/i.test(e.nm) ? 1 : 0);
+    pick.sort((a, b) => score(b) - score(a));
     return pick[0];
   }
 
