@@ -6,7 +6,7 @@ com base no **ritmo de crescimento dos votos** de cada candidato.
 
 ## Uso
 
-Abra `index.html` no navegador. Sem configuração, roda em **modo simulação** (dados fictícios).
+Abra `index.html` no navegador. Por padrão usa a **fonte oficial do TSE** (`resultados.tse.jus.br`): detecta sozinha a eleição do dia em `oficial/comum/config/ele-c.json`. Só se o TSE não responder (rede ou CORS) cai no **modo simulação**, com aviso.
 
 Para dados reais, abra *Fonte de dados e configuração* e informe o ciclo (ex.: `ele2026`),
 o código da eleição e o cargo, ou clique em *Detectar eleição de hoje*. Também dá para passar

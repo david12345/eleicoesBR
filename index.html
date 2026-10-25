@@ -211,6 +211,7 @@
     <div class="form">
       <label>Modo
         <select id="cMode">
+          <option value="auto">Automático (TSE, eleição de hoje)</option>
           <option value="tse">TSE ao vivo</option>
           <option value="sim">Simulação</option>
         </select>
@@ -302,7 +303,7 @@
   };
 
   // ---------- configuração ----------
-  const DEFAULT_CFG = { mode: 'sim', ciclo: 'ele2026', eleicao: '', cargo: '0001', abr: 'br', proxy: '', url: '' };
+  const DEFAULT_CFG = { mode: 'auto', ciclo: 'ele2026', eleicao: '', cargo: '0001', abr: 'br', proxy: '', url: '' };
   let cfg = Object.assign({}, DEFAULT_CFG, store.get('eleicoes.cfg') || {});
   const qp = new URLSearchParams(location.search);
   if (qp.has('ciclo')) cfg.ciclo = qp.get('ciclo');
@@ -313,7 +314,10 @@
   if (qp.has('proxy')) cfg.proxy = qp.get('proxy');
   if (qp.get('modo') === 'sim') cfg.mode = 'sim';
   if (qp.get('modo') === 'tse') cfg.mode = 'tse';
-  if (cfg.mode === 'tse' && !cfg.eleicao && !cfg.url) cfg.mode = 'sim';
+  if (qp.get('modo') === 'auto') cfg.mode = 'auto';
+  // sem código de eleição: detectar a eleição do dia no TSE
+  if (cfg.mode === 'tse' && !cfg.eleicao && !cfg.url) cfg.mode = 'auto';
+  let autoFailed = '';
 
   const buildUrl = (c) => {
     if (c.url) return c.url;
@@ -592,7 +596,7 @@
   function renderBanner() {
     const b = $('banner');
     if (cfg.mode === 'sim') {
-      b.innerHTML = `<div class="banner warn"><b>Modo simulação.</b> Os números são fictícios, gerados localmente para demonstrar a projeção.
+      b.innerHTML = `<div class="banner warn"><b>Modo simulação.</b> ${autoFailed ? `Não foi possível acessar a fonte oficial do TSE (${esc(autoFailed)}). ` : ''}Os números são fictícios, gerados localmente para demonstrar a projeção.
         Para dados reais, abra <b>Fonte de dados e configuração</b> abaixo e informe o código da eleição (ou use “Detectar eleição de hoje”).</div>`;
     } else if (fails >= 2) {
       b.innerHTML = `<div class="banner err"><b>Não foi possível ler os dados do TSE</b> (${esc(lastError)}).
@@ -816,23 +820,27 @@
   }
 
   // detecção da eleição do dia pelo arquivo de configuração do TSE
+  async function findElection() {
+    const r = await fetch(withProxy(`${TSE_BASE}/comum/config/ele-c.json?_=${Date.now()}`), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const today = new Date().toLocaleDateString('pt-BR');
+    const all = [];
+    (j.pl || []).forEach((pl) => (pl.e || []).forEach((e) => all.push({ ciclo: pl.cdpr || pl.cd, cd: e.cd, dt: e.dt || pl.dt || '', nm: e.nm || '', t: e.t, tp: e.tp })));
+    if (!all.length) throw new Error('formato inesperado');
+    const toKey = (d) => { const [dd, mm, yy] = String(d).split('/'); return `${yy}${mm}${dd}`; };
+    let pick = all.filter((e) => e.dt === today);
+    if (!pick.length) pick = all.slice().sort((a, b) => toKey(b.dt).localeCompare(toKey(a.dt))).slice(0, 1);
+    // preferir eleição ordinária (não suplementar)
+    pick.sort((a, b) => (String(a.tp) === '0' ? -1 : 0) - (String(b.tp) === '0' ? -1 : 0));
+    return pick[0];
+  }
+
   async function detect() {
     const btn = $('detectBtn');
     btn.disabled = true; btn.textContent = 'Detectando…';
     try {
-      const r = await fetch(withProxy(`${TSE_BASE}/comum/config/ele-c.json?_=${Date.now()}`), { cache: 'no-store' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const j = await r.json();
-      const today = new Date().toLocaleDateString('pt-BR');
-      const all = [];
-      (j.pl || []).forEach((pl) => (pl.e || []).forEach((e) => all.push({ ciclo: pl.cdpr || pl.cd, cd: e.cd, dt: e.dt || pl.dt || '', nm: e.nm || '', t: e.t, tp: e.tp })));
-      if (!all.length) throw new Error('formato inesperado');
-      const toKey = (d) => { const [dd, mm, yy] = String(d).split('/'); return `${yy}${mm}${dd}`; };
-      let pick = all.filter((e) => e.dt === today);
-      if (!pick.length) pick = all.slice().sort((a, b) => toKey(b.dt).localeCompare(toKey(a.dt))).slice(0, 1);
-      // preferir eleição ordinária (não suplementar)
-      pick.sort((a, b) => (String(a.tp) === '0' ? -1 : 0) - (String(b.tp) === '0' ? -1 : 0));
-      const e = pick[0];
+      const e = await findElection();
       $('cMode').value = 'tse'; $('cCiclo').value = e.ciclo; $('cEleicao').value = e.cd; $('cUrl').value = '';
       btn.textContent = `Encontrada: ${e.cd} (${e.dt}) — clique em Aplicar`;
     } catch (err) {
@@ -841,6 +849,21 @@
       btn.disabled = false;
       setTimeout(() => { btn.textContent = 'Detectar eleição de hoje (TSE)'; }, 6000);
     }
+  }
+
+  // modo automático: usa a fonte oficial do TSE; só cai na simulação se o TSE não responder
+  async function boot() {
+    autoFailed = '';
+    if (cfg.mode !== 'auto') return start();
+    $('statusText').textContent = 'Procurando a eleição de hoje no TSE…';
+    try {
+      const e = await findElection();
+      cfg = Object.assign({}, cfg, { mode: 'tse', ciclo: e.ciclo, eleicao: e.cd, url: '' });
+    } catch (err) {
+      autoFailed = err.name === 'TypeError' ? 'requisição bloqueada (CORS ou rede)' : (err.message || String(err));
+      cfg = Object.assign({}, cfg, { mode: 'sim' });
+    }
+    start();
   }
 
   // ---------- eventos ----------
@@ -856,7 +879,7 @@
   $('applyBtn').onclick = () => {
     cfg = readForm();
     if (cfg.mode === 'tse' && !cfg.eleicao && !cfg.url) { alert('Informe o código da eleição ou uma URL.'); return; }
-    store.set('eleicoes.cfg', cfg); start();
+    store.set('eleicoes.cfg', cfg); boot();
   };
   $('simBtn').onclick = () => { cfg = Object.assign(readForm(), { mode: 'sim' }); store.set('eleicoes.cfg', cfg); start(); };
   $('test2022Btn').onclick = () => {
@@ -868,7 +891,7 @@
   $('chart').addEventListener('mouseleave', onChartLeave);
   let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (history.length) renderChart(sortedIds(history[history.length - 1])); }, 150); });
 
-  start();
+  boot();
 })();
 </script>
 </body>
